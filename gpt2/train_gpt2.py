@@ -17,28 +17,28 @@ import torch.distributed as dist
 # torchrun command sets the env variables
 ddp = int(os.environ.get('RANK', -1) != -1)
 if ddp:
-  assert torch.cuda.is_available()
-  init_process_group(backend='nccl')
-  ddp_rank = int(os.environ['RANK'])
-  ddp_local_rank = int(os.environ['LOCAL_RANK'])
-  ddp_world_size = int(os.environ['WORLD_SIZE'])
-  device = f'cuda:{ddp_local_rank}'
-  torch.cuda.set_device(device)
-  master_process = ddp_rank == 0
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
 else:
-  ddp_rank = 0
-  ddp_local_rank = 0
-  ddp_world_size = 1
-  master_process = True
-  device = 'cuda' if torch.cuda.is_available() else (
-    'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = 'cuda' if torch.cuda.is_available() else (
+        'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 print(f'using device_type: {device_type}')
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
-  torch.cuda.manual_seed(1337)
+    torch.cuda.manual_seed(1337)
 
 
 # ------------------ DATA LOADER ----------------
@@ -69,17 +69,15 @@ class DataLoaderLite:
             print(f'found {len(self.shards)} shards for split {split}')
 
         self.reset()
-        
-    
+
     def reset(self):
         self.current_shard = 0
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank
-    
-        
+
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position:self.current_position + B * T + 1]            
+        buf = self.tokens[self.current_position:self.current_position + B * T + 1]
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
 
@@ -90,7 +88,7 @@ class DataLoaderLite:
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.current_position = self.B * self.T * self.process_rank
             self.tokens = load_tokens(self.shards[self.current_shard])
-            
+
         return x, y
 
 
@@ -300,26 +298,25 @@ class GPT(nn.Module):
 # ------------------------TRAIN---------------------------
 torch.set_float32_matmul_precision('high')
 
-total_batch_size = 524288 # 2**19, ~0.5M tokens in the original gpt2 paper
-B=64 # micro batch size
-T=1024
-assert total_batch_size % (B*T*ddp_world_size) == 0
-grad_accum_steps = total_batch_size // (B*T*ddp_world_size)
+total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
+B = 64  # micro batch size
+T = 1024
+assert total_batch_size % (B * T * ddp_world_size) == 0
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
-  print(f"total desired batch size: {total_batch_size}, calculated gradient accumulation steps: {grad_accum_steps}")
-
+    print(f"total desired batch size: {total_batch_size}, calculated gradient accumulation steps: {grad_accum_steps}")
 
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank]) # averages and deposit the gradient on each GPU
+    model = DDP(model, device_ids=[ddp_local_rank])  # averages and deposit the gradient on each GPU
 raw_model = model.module if ddp else model
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 715 # gpt paper says warmup 375e6 tokens, 375e6/2**19 = 715
-max_steps = 19073 # we want to train 10B tokens total, 10e9/2**19 = 19073
+warmup_steps = 715  # gpt paper says warmup 375e6 tokens, 375e6/2**19 = 715
+max_steps = 19073  # we want to train 10B tokens total, 10e9/2**19 = 19073
 
 
 def get_lr(it):
@@ -346,16 +343,16 @@ for step in range(max_steps):
 
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
-      x, y = train_loader.next_batch()
-      x, y = x.to(device), y.to(device)    
-      with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-          logits, loss = model(x, y)
-      # We have to scale the loss to account for gradient accumulation.  
-      loss = loss / grad_accum_steps    
-      loss_accum += loss.detach()
-      if ddp:
-          model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-      loss.backward()
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        # We have to scale the loss to account for gradient accumulation.
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        loss.backward()
 
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
@@ -376,12 +373,14 @@ for step in range(max_steps):
 
     if master_process:
         print(
-            f'step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, time: {dt*1000:.2f}ms, tok/s: {tokens_per_sec:.2f}')
+            f'step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, time: {dt * 1000:.2f}ms, tok/s: {tokens_per_sec:.2f}')
 
 if ddp:
     destroy_process_group()
 
-import sys; sys.exit(0)
+import sys;
+
+sys.exit(0)
 
 # ----------------INFERENCE--------------
 """
@@ -419,4 +418,3 @@ for i in range(num_return_sequence):
     decoded = enc.decode(ids)
     print(">", decoded)
 """
-
