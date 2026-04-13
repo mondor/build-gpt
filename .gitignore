@@ -8,3 +8,19 @@ wheels/
 
 # Virtual environments
 .venv
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+.python-version
+
+# optional (depends on your workflow)
+__pycache__/
+*.pyc
