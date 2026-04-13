@@ -95,6 +95,32 @@ def iterate_examples(split):
             yield example
 
 
+def get_most_likely_row(tokens, mask, logits):
+    # eval the autoregressive loss at all positions
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_tokens = tokens[..., 1:].contiguous()
+    flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_shift_tokens = shift_tokens.view(-1)
+    # by default, reduction=mean. but here reduction=none will return (B*T,)
+    shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')  # (B*T,)
+    shift_losses = shift_losses.view(tokens.size(0), -1)  # tokens.size(0) is 4, so (B, T)
+
+    # now get the average loss just for the completion region (where mask == 1), in each row
+    shift_mask = (mask[..., 1:]).contiguous()  # we must shift mask, so we start at the last prompt token
+    masked_shift_losses = shift_losses * shift_mask
+
+    # sum and divide by the number of 1s in the mask
+    sum_loss = masked_shift_losses.sum(dim=1)  # collapse the cols, so (B,)
+    avg_loss = sum_loss / shift_mask.sum(dim=1)
+
+    # now we have a loss for each of the 4 completions.
+    # the one with the lowest loss should be the most likely
+    pred = sum_loss.argmin().item()
+    pred_norm = avg_loss.argmin().item()
+
+    return pred, pred_norm
+
+
 @torch.no_grad()
 def evaluate_hf(model_type, device):
     torch.set_float32_matmul_precision('high')  # use tf32
@@ -108,26 +134,8 @@ def evaluate_hf(model_type, device):
     for example in iterate_examples('val'):
         data, tokens, mask, label = render_example(example)
         tokens, mask = tokens.to(device), mask.to(device)
-
         logits = model(tokens).logits
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_tokens = tokens[..., 1:].contiguous()
-        flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-        flat_shift_tokens = shift_tokens.view(-1)
-        shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
-
-        # now get the average loss just for the completion region (where mask == 1), in each row
-        shift_mask = (mask[..., 1:]).contiguous()  # we must shift mask, so we start at the last prompt token
-        masked_shift_losses = shift_losses * shift_mask
-
-        # sum and divide by the number of 1s in the mask
-        sum_loss = masked_shift_losses.sum(dim=1)
-        avg_loss = sum_loss / shift_mask.sum(dim=1)
-
-        # now we have a loss for each of the 4 completions.
-        # the one with the lowest loss should be the most likely
-        pred = sum_loss.argmin().item()
-        pred_norm = avg_loss.argmin().item()
+        pred, pred_norm = get_most_likely_row(tokens, mask, logits)
 
         num_total += 1
         num_correct += int(pred == label)
@@ -146,6 +154,7 @@ def evaluate_hf(model_type, device):
 
 if __name__ == '__main__':
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--model_type', type=str, default='gpt2')
     parser.add_argument('-d', '--device', type=str, default='cuda')
