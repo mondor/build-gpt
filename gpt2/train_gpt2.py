@@ -2,8 +2,8 @@ import os
 import math
 import inspect
 import time
-import tiktoken
 from dataclasses import dataclass
+from dataloader import DataLoaderLite
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
-# torchrun --standalone --nproc_per_node=4 train_gpt2.py 
+# torchrun --standalone --nproc_per_node=8 train_gpt2.py
 # set up distributed data parallel
 # torchrun command sets the env variables
 ddp = int(os.environ.get('RANK', -1) != -1)
@@ -24,12 +24,10 @@ if ddp:
     ddp_world_size = int(os.environ['WORLD_SIZE'])
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
-    master_process = ddp_rank == 0
 else:
     ddp_rank = 0
     ddp_local_rank = 0
     ddp_world_size = 1
-    master_process = True
     device = 'cuda' if torch.cuda.is_available() else (
         'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
 
@@ -39,57 +37,6 @@ print(f'using device_type: {device_type}')
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
-
-
-# ------------------ DATA LOADER ----------------
-def load_tokens(filename):
-    npt = np.load(filename)
-    npt = npt.astype(np.int32)
-    ptt = torch.tensor(npt, dtype=torch.long)
-    return ptt
-
-
-class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes, split):
-        self.B = B
-        self.T = T
-        self.process_rank = process_rank
-        self.num_processes = num_processes
-        assert split in {'train', 'val'}
-
-        data_root = '/workspace/edu_fineweb10B'
-        shards = os.listdir(data_root)
-        shards = [s for s in shards if split in s]
-        shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
-        self.shards = shards
-
-        assert len(self.shards) > 0
-        if master_process:
-            print(f'found {len(self.shards)} shards for split {split}')
-
-        self.reset()
-
-    def reset(self):
-        self.current_shard = 0
-        self.tokens = load_tokens(self.shards[self.current_shard])
-        self.current_position = self.B * self.T * self.process_rank
-
-    def next_batch(self):
-        B, T = self.B, self.T
-        buf = self.tokens[self.current_position:self.current_position + B * T + 1]
-        x = buf[:-1].view(B, T)
-        y = buf[1:].view(B, T)
-
-        self.current_position += B * T * self.num_processes
-
-        # if loading the next batch would be out of bounds, advance to the next shard
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
-            self.current_position = self.B * self.T * self.process_rank
-            self.tokens = load_tokens(self.shards[self.current_shard])
-
-        return x, y
 
 
 # -------------------GPT MODEL------------------
@@ -296,14 +243,14 @@ class GPT(nn.Module):
 
 
 # ------------------------TRAIN---------------------------
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('high')  # use tf32
 
 total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
 B = 64  # micro batch size
 T = 1024
 assert total_batch_size % (B * T * ddp_world_size) == 0
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-if master_process:
+if ddp_rank == 0:
     print(f"total desired batch size: {total_batch_size}, calculated gradient accumulation steps: {grad_accum_steps}")
 
 model = GPT(GPTConfig(vocab_size=50304))
@@ -332,28 +279,49 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
 
 
-train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size)
+train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
+val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
+
 # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
 for step in range(max_steps):
     t0 = time.time()
 
-    optimizer.zero_grad()
+    # val
+    if step % 100 == 0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = val_loader.next_batch()
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+            if ddp:
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+            if ddp_rank == 0:
+                print(f'val loss: {val_loss_accum.item():.4f}')
 
+    # training
+    model.train()
+    optimizer.zero_grad()
     loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         # We have to scale the loss to account for gradient accumulation.
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         loss.backward()
-
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
 
@@ -365,22 +333,17 @@ for step in range(max_steps):
     optimizer.step()
 
     torch.cuda.synchronize()
-
     t1 = time.time()
     dt = t1 - t0
 
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / dt
 
-    if master_process:
+    if ddp_rank == 0:
         print(
             f'step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, time: {dt * 1000:.2f}ms, tok/s: {tokens_per_sec:.2f}')
 
 if ddp:
     destroy_process_group()
-
-import sys;
-
-sys.exit(0)
 
 # ----------------INFERENCE--------------
 """
