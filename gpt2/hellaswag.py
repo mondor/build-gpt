@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers import GPT2LMHeadModel
-from transformers.integrations import tiktoken
+import tiktoken
 
 DATA_CACHE_DIR = '/workspace/hellaswag'
 
@@ -111,21 +111,21 @@ def get_most_likely_row(tokens, mask, logits):
 
     # sum and divide by the number of 1s in the mask
     sum_loss = masked_shift_losses.sum(dim=1)  # collapse the cols, so (B,)
-    avg_loss = sum_loss / shift_mask.sum(dim=1)
+    avg_loss = sum_loss / shift_mask.sum(dim=1) # (B,)
 
     # now we have a loss for each of the 4 completions.
     # the one with the lowest loss should be the most likely
     pred = sum_loss.argmin().item()
     pred_norm = avg_loss.argmin().item()
 
-    return pred, pred_norm
+    return pred, pred_norm, sum_loss, avg_loss
 
 
 @torch.no_grad()
 def evaluate_hf(model_type, device):
     torch.set_float32_matmul_precision('high')  # use tf32
     model = GPT2LMHeadModel.from_pretrained(model_type)
-    model.to_device(device)
+    model.to(device)
 
     num_correct_norm = 0
     num_correct = 0
@@ -135,7 +135,7 @@ def evaluate_hf(model_type, device):
         data, tokens, mask, label = render_example(example)
         tokens, mask = tokens.to(device), mask.to(device)
         logits = model(tokens).logits
-        pred, pred_norm = get_most_likely_row(tokens, mask, logits)
+        pred, pred_norm, sum_loss, avg_loss = get_most_likely_row(tokens, mask, logits)
 
         num_total += 1
         num_correct += int(pred == label)
@@ -145,7 +145,7 @@ def evaluate_hf(model_type, device):
 
         if num_total < 10:
             print('---')
-            print(f'Context: {example['ctx']}')
+            print(f"Context: {example['ctx']}")
             print(f'Endings:')
             for i, end in enumerate(example['endings']):
                 print(f'{i} (loss: {avg_loss[i].item():.4f}) {end}')

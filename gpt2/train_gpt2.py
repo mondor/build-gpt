@@ -344,9 +344,9 @@ for step in range(max_steps):
             with torch.no_grad():
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(tokens)
-                _, pred_norm = get_most_likely_row(tokens, mask, logits)
+                _, pred_norm, _, _ = get_most_likely_row(tokens, mask, logits)
             num_total += 1
-            num_correct_norm = int(pred_norm == label)
+            num_correct_norm += int(pred_norm == label)
         # reduce the stats across all processes
         if ddp:
             num_total = torch.tensor(num_total, dtype=torch.long, device=device)
@@ -359,7 +359,7 @@ for step in range(max_steps):
         if ddp_rank == 0:
             print(f'HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}')
             with open(log_file, 'a') as f:
-                f.write(f'{step} hella {acc_norm:.4f}')
+                f.write(f'{step} hella {acc_norm:.4f}\n')
 
     # generate some sample
     if (step % 250 == 0 or last_step) and (not use_compile):
@@ -414,7 +414,9 @@ for step in range(max_steps):
         param_group['lr'] = lr
     optimizer.step()
 
-    torch.cuda.synchronize()
+    if device_type == "cuda":
+        torch.cuda.synchronize()
+        
     t1 = time.time()
     dt = t1 - t0
 
@@ -423,6 +425,9 @@ for step in range(max_steps):
     if ddp_rank == 0:
         print(
             f'step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, norm: {norm:.4f}, time: {dt * 1000:.2f}ms, tok/s: {tokens_per_sec:.2f}')
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
+
 
 if ddp:
     destroy_process_group()
