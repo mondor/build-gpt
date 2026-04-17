@@ -38,6 +38,9 @@ class DataLoaderClimbMix:
         self._doc_buffer = []
         self._buffer_size = buffer_size
 
+    def reset(self):
+        pass
+    
     def _refill_buffer(self):
         text_batch = next(self._batches)  # get another batch of 128 documents
         for text in text_batch:
