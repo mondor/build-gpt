@@ -4,6 +4,7 @@ import inspect
 import time
 from dataclasses import dataclass
 from dataloader import DataLoaderLite
+from dataloader_climbmix import DataLoaderClimbMix
 
 import torch
 import torch.nn as nn
@@ -252,6 +253,10 @@ if __name__ == '__main__':
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
     B = 64  # micro batch size
     T = 1024
+    use_compile = False
+    data_source = 'climbmix'
+
+    # gradient accumulation
     assert total_batch_size % (B * T * ddp_world_size) == 0
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     if ddp_rank == 0:
@@ -260,7 +265,6 @@ if __name__ == '__main__':
 
     model = GPT(GPTConfig(vocab_size=50304))
     model.to(device)
-    use_compile = False
     if use_compile:
         model = torch.compile(model)
     if ddp:
@@ -288,8 +292,12 @@ if __name__ == '__main__':
         return min_lr + coeff * (max_lr - min_lr)
 
 
-    train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
-    val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
+    if data_source == 'climbmix':
+        train_loader = DataLoaderClimbMix(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
+        val_loader = DataLoaderClimbMix(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
+    else:
+        train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
+        val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
 
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
