@@ -16,7 +16,7 @@ import tiktoken
 
 from hellaswag import render_example, iterate_examples, get_most_likely_row
 
-# torchrun --standalone --nproc_per_node=8 train_gpt2.py
+# torchrun --standalone --nproc_per_node=8 train_gpt_124M.py
 # set up distributed data parallel
 # torchrun command sets the env variables
 ddp = int(os.environ.get('RANK', -1) != -1)
@@ -253,8 +253,8 @@ if __name__ == '__main__':
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
     B = 32  # micro batch size
     T = 1024
-    use_compile = False
-    data_source = 'climbmix'
+    use_compile = True
+    data_source = 'fineweb'
 
     # gradient accumulation
     assert total_batch_size % (B * T * ddp_world_size) == 0
@@ -295,7 +295,7 @@ if __name__ == '__main__':
     if data_source == 'climbmix':
         train_loader = DataLoaderClimbMix(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
         val_loader = DataLoaderClimbMix(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
-    else:
+    elif data_source == 'fineweb':
         train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='train')
         val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
 
@@ -372,7 +372,7 @@ if __name__ == '__main__':
                     f.write(f'{step} hella {acc_norm:.4f}\n')
 
         # generate some sample
-        if (step % 250 == 0 or last_step) and (not use_compile):
+        if step % 250 == 0 or last_step:
             model.eval()
             num_return_sequences = 4
             max_length = 32

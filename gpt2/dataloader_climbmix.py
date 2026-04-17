@@ -63,7 +63,7 @@ class DataLoaderClimbMix:
 
                 best_idx = -1
                 best_len = 0
-                shortest_len = 0
+                shortest_len = float('inf')
                 shortest_idx = -1
                 for i, doc in enumerate(self._doc_buffer):
                     doc_len = len(doc)
