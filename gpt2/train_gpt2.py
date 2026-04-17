@@ -302,7 +302,7 @@ if __name__ == '__main__':
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
     optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
-    log_file = f"log.txt"
+    log_file = f"log_{data_source}.txt"
     with open(log_file, 'w') as f:  # open for writing to clear the file
         pass
 
@@ -339,7 +339,7 @@ if __name__ == '__main__':
                         }
                         # you might also want to add optimizer.state_dict() and
                         # rng seeds etc., if you wanted to more exactly resume training
-                        torch.save(checkpoint, f'model_{step:05d}.pt')
+                        torch.save(checkpoint, f'model_{step:05d}_{data_source}.pt')
 
         # hellaswag val
         if (step % 250 == 0 or last_step) and (not use_compile):
