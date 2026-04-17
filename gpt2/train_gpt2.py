@@ -251,7 +251,7 @@ if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')  # use tf32
 
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
-    B = 64  # micro batch size
+    B = 32  # micro batch size
     T = 1024
     use_compile = False
     data_source = 'climbmix'
