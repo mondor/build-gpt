@@ -14,6 +14,7 @@ def download_single_file(index):
     filepath = os.path.join(DATA_DIR, filename)
     if os.path.exists(filepath):
         print(f'Skipping {filepath} already exists')
+        return True
     url = f'{BASE_URL}/{filename}'
     print(f'Downloading {url}...')
     max_attempts = 6

@@ -17,8 +17,8 @@ import tiktoken
 
 from hellaswag import render_example, iterate_examples, get_most_likely_row
 
-# torchrun --standalone --nproc_per_node=8 train_gpt.py --model 124M --data-source fineweb
-# torchrun --standalone --nproc_per_node=8 train_gpt.py --model 700M --data-source climbmix
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 124M --data-source fineweb
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 700M --data-source climbmix
 # set up distributed data parallel
 # torchrun command sets the env variables
 ddp = int(os.environ.get('RANK', -1) != -1)
@@ -297,7 +297,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='124M', choices=['124M', '700M'])
+    parser.add_argument('--model-size', type=str, default='124M', choices=['124M', '700M'])
     parser.add_argument('--data-source', type=str, default='fineweb', choices=['fineweb', 'climbmix'])
     args = parser.parse_args()
 
@@ -307,7 +307,7 @@ if __name__ == '__main__':
     train_config = TRAIN_CONFIG[args.model]
 
     data_source = args.data_source
-    model_size = args.model
+    model_size = args.model_size
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
     B = train_config['B']  # micro batch size
     T = train_config['T']

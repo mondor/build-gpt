@@ -6,8 +6,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import tiktoken
 
-from train_gpt_700M import GPT, GPTConfig
+from train_gpt import GPT
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
+
+# torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
 
 ddp = int(os.environ.get('RANK', -1) != -1)
 if ddp:
@@ -31,28 +33,6 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-# ----- Load pretrained checkpoint -----
-checkpoint = torch.load('weights/model_19072.pt', weights_only=False, map_location=device)
-config = checkpoint['config']
-model = GPT(config)
-model.load_state_dict(checkpoint['model'])
-model = model.to(device)
-if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
-raw_model = model.module if ddp else model
-if ddp_rank == 0:
-    print(f'Loaded pretrained model (step: {checkpoint['step']}, val_loss:{checkpoint['val_loss']:.4f})')
-
-enc = tiktoken.get_encoding('gpt2')
-
-# --- Hyperparameters ---
-B = 32
-T = 1024
-total_batch_size = 524288
-grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-learning_rate = 6e-5  # 10x lower than pretraining max_lr
-weight_decay = 0.0
-
 SPECIAL_TOKENS = {
     '<|bos|>': 50256,  # beginning of sequence, same as <|endoftext|>
     '<|user_start|>': 50257,
@@ -60,21 +40,6 @@ SPECIAL_TOKENS = {
     '<|assistant_start|>': 50259,
     '<|assistant_end|>': 50260,
 }
-
-train_dataset = TaskMixture([
-    SmolTalk(split='train'),  # 460K general conversation
-    *[MMLUTask(subset="all", split='auxiliary_train') for _ in range(3)],  # 100K x 3
-    *[GSM8KTask(subset="main", split='train') for _ in range(4)],  # 8K x 4
-])
-val_dataset = TaskMixture([
-    SmolTalk(split="test"),
-    MMLUTask(subset="all", split="test"),
-    GSM8KTask(subset="main", split="test"),
-])
-
-dataset_size = len(train_dataset)
-if ddp_rank == 0:
-    print(f'SFT training mixture: {dataset_size:,} conversations')
 
 
 def render_conversation(conversation, max_tokens):
@@ -190,103 +155,151 @@ def sft_data_generator(dataset, buffer_size=100):
         yield inputs.to(device), targets.to(device), consumed / dataset_len
 
 
-train_loader = sft_data_generator(train_dataset)
-optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=learning_rate,
-                                           device_type=device_type)
+# ----- Load pretrained checkpoint -----
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint-filename', type=str)
+    args = parser.parse_args()
+    checkpoint_filename = args.checkpoint_filename
+
+    torch.set_float32_matmul_precision('high')  # use tf32
+
+    checkpoint = torch.load(f'weights/{checkpoint_filename}', weights_only=False, map_location=device)
+    config = checkpoint['config']
+    model = GPT(config)
+    model.load_state_dict(checkpoint['model'])
+    model = model.to(device)
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+    raw_model = model.module if ddp else model
+    if ddp_rank == 0:
+        print(
+            f'Loaded pretrained model {checkpoint_filename} (step: {checkpoint['step']}, val_loss:{checkpoint['val_loss']:.4f})')
+
+    enc = tiktoken.get_encoding('gpt2')
+
+    # --- Hyperparameters ---
+    B = 32
+    T = 1024
+    total_batch_size = 524288
+    grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+    learning_rate = 6e-5  # 10x lower than pretraining max_lr
+    weight_decay = 0.0
+
+    train_dataset = TaskMixture([
+        SmolTalk(split='train'),  # 460K general conversation
+        *[MMLUTask(subset="all", split='auxiliary_train') for _ in range(3)],  # 100K x 3
+        *[GSM8KTask(subset="main", split='train') for _ in range(4)],  # 8K x 4
+    ])
+    val_dataset = TaskMixture([
+        SmolTalk(split="test"),
+        MMLUTask(subset="all", split="test"),
+        GSM8KTask(subset="main", split="test"),
+    ])
+
+    dataset_size = len(train_dataset)
+    if ddp_rank == 0:
+        print(f'SFT training mixture: {dataset_size:,} conversations')
+
+    train_loader = sft_data_generator(train_dataset)
+    optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=learning_rate,
+                                               device_type=device_type)
 
 
-# Learning rate schedule (linear warmup, constant, linear warmdown)
-# Same shape as base_train but uses progress (0→1) instead of absolute step counts,
-# because SFT doesn't always know num_iterations in advance (dataset-driven stopping).
-def get_lr_multiplier(progress, warmup_ratio=0.0, warmdown_ratio=0.5, final_lr_frac=0.0):
-    if progress < warmup_ratio:
-        return (progress + 1e-8) / warmup_ratio
-    elif progress <= 1.0 - warmdown_ratio:
-        return 1.0
-    else:
-        decay = (progress - (1.0 - warmdown_ratio)) / warmdown_ratio
-        return (1 - decay) * 1.0 + decay * final_lr_frac
+    # Learning rate schedule (linear warmup, constant, linear warmdown)
+    # Same shape as base_train but uses progress (0→1) instead of absolute step counts,
+    # because SFT doesn't always know num_iterations in advance (dataset-driven stopping).
+    def get_lr_multiplier(progress, warmup_ratio=0.0, warmdown_ratio=0.5, final_lr_frac=0.0):
+        if progress < warmup_ratio:
+            return (progress + 1e-8) / warmup_ratio
+        elif progress <= 1.0 - warmdown_ratio:
+            return 1.0
+        else:
+            decay = (progress - (1.0 - warmdown_ratio)) / warmdown_ratio
+            return (1 - decay) * 1.0 + decay * final_lr_frac
 
 
-def eval_and_save(step):
-    model.eval()
-    with torch.no_grad():
-        val_loss_accum = 0.0
-        val_loader = sft_data_generator(val_dataset)
+    def eval_and_save(step):
+        model.eval()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loader = sft_data_generator(val_dataset)
 
+            for micro_step in range(grad_accum_steps):
+                x, y, _ = next(val_loader)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss = loss / grad_accum_steps
+                val_loss_accum += loss.detach()
+
+            if ddp:
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+
+            if ddp_rank == 0:
+                print(f'sft val loss: {val_loss_accum.item():.4f}')
+
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item()
+                }
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save(checkpoint, f'weights/sft_{checkpoint_filename}')
+
+
+    step = 0
+    x, y, progress = next(train_loader)
+    while True:
+        t0 = time.time()
+
+        model.train()
+        optimizer.zero_grad()
+
+        loss_accum = 0.0
         for micro_step in range(grad_accum_steps):
-            x, y, _ = next(val_loader)
+            if ddp:
+                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y)
             loss = loss / grad_accum_steps
-            val_loss_accum += loss.detach()
+            loss.backward()
+            loss_accum += loss.detach()
+            x, y, progress = next(train_loader)  # progress can be greater than 1.0
 
         if ddp:
-            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # Step the optimizer
+        lr = learning_rate * get_lr_multiplier(progress)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        optimizer.step()
+
+        step += 1
+
+        if device_type == "cuda":
+            torch.cuda.synchronize()
+
+        t1 = time.time()
+        dt = t1 - t0
 
         if ddp_rank == 0:
-            print(f'sft val loss: {val_loss_accum.item():.4f}')
+            print(
+                f'sft step {step}, loss: {loss_accum:.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
 
-            checkpoint = {
-                'model': raw_model.state_dict(),
-                'config': raw_model.config,
-                'step': step,
-                'val_loss': val_loss_accum.item()
-            }
-            # you might also want to add optimizer.state_dict() and
-            # rng seeds etc., if you wanted to more exactly resume training
-            torch.save(checkpoint, f'weights/sft_model_{step:05d}.pt')
+        if step % 5000 == 0:
+            eval_and_save(step)
 
+        if progress > 1:
+            break
 
-step = 0
-x, y, progress = next(train_loader)
-while True:
-    t0 = time.time()
-
-    model.train()
-    optimizer.zero_grad()
-
-    loss_accum = 0.0
-    for micro_step in range(grad_accum_steps):
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss = loss / grad_accum_steps
-        loss.backward()
-        loss_accum += loss.detach()
-        x, y, progress = next(train_loader)  # progress can be greater than 1.0
+    eval_and_save(step)
 
     if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-    # Step the optimizer
-    lr = learning_rate * get_lr_multiplier(progress)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    optimizer.step()
-
-    step += 1
-
-    if device_type == "cuda":
-        torch.cuda.synchronize()
-
-    t1 = time.time()
-    dt = t1 - t0
-
-    if ddp_rank == 0:
-        print(
-            f'sft step {step}, loss: {loss_accum:.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
-
-    if step % 5000 == 0:
-        eval_and_save(step)
-
-    if progress > 1:
-        break
-
-eval_and_save(step)
-
-if ddp:
-    destroy_process_group()
+        destroy_process_group()
