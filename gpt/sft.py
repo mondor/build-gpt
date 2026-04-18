@@ -206,7 +206,7 @@ if __name__ == '__main__':
 
     train_loader = sft_data_generator(train_dataset)
     optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=learning_rate,
-                                               device_type=device_type)
+                                               device_type=device_type, betas=(0.9, 0.95), eps=1e-8)
 
 
     # Learning rate schedule (linear warmup, constant, linear warmdown)
