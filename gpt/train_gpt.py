@@ -3,6 +3,7 @@ import math
 import inspect
 import time
 from dataclasses import dataclass
+
 from dataloader import DataLoaderLite
 from dataloader_climbmix import DataLoaderClimbMix
 
@@ -16,7 +17,8 @@ import tiktoken
 
 from hellaswag import render_example, iterate_examples, get_most_likely_row
 
-# torchrun --standalone --nproc_per_node=8 train_gpt_124M.py
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model 124M --data-source fineweb
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model 700M --data-source climbmix
 # set up distributed data parallel
 # torchrun command sets the env variables
 ddp = int(os.environ.get('RANK', -1) != -1)
@@ -41,6 +43,50 @@ print(f'using device_type: {device_type}')
 torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
+
+MODEL_CONFIG = {
+    '124M': dict(
+        block_size=1024,
+        vocab_size=50304,
+        n_layer=12,
+        n_head=12,
+        n_embed=768,
+    ),
+    '700M': dict(
+        block_size=2048,
+        vocab_size=50304,
+        n_layer=24,
+        n_head=12,
+        n_embed=1536,
+    )
+}
+
+TRAIN_CONFIG = {
+    '124M': dict(
+        B=32,
+        T=1024,
+        max_lr=6e-4,
+        weight_decay=0.1,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        warmup_steps=715,  # gpt paper says warmup 375e6 tokens, 375e6/2**19 = 715
+        max_steps=19073,  # in the gpt paper, the model was trained on 10B tokens, 10e9/2**19 = 19073
+        lr_schedule='cosine'
+    ),
+    '700M': dict(
+        B=16,
+        T=2048,
+        max_lr=3e-4,
+        weight_decay=0.035,
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        warmup_steps=40,
+        max_steps=10700,  # in nanochat repo, data:param ratio was 8:1
+        lr_schedule='trapezoidal',
+        warmdown_ratio=0.65,
+        min_lr_frac=0.05,
+    )
+}
 
 
 # -------------------GPT MODEL------------------
@@ -219,7 +265,7 @@ class GPT(nn.Module):
 
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, device_type, betas, eps):
         # start with all of the candidate parameters (that required grad)
         param_dict = {pn: p for pn, p in self.named_parameters()}
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
@@ -241,20 +287,42 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == "cuda"
         print(f'using fused adamW: {use_fused}')
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, eps=eps, fused=use_fused)
 
         return optimizer
 
 
 # ------------------------TRAIN---------------------------
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='124M', choices=['124M', '700M'])
+    parser.add_argument('--data-source', type=str, default='fineweb', choices=['fineweb', 'climbmix'])
+    args = parser.parse_args()
+
     torch.set_float32_matmul_precision('high')  # use tf32
 
+    model_config = MODEL_CONFIG[args.model]
+    train_config = TRAIN_CONFIG[args.model]
+
+    data_source = args.data_source
+    model_size = args.model
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
-    B = 32  # micro batch size
-    T = 1024
-    use_compile = True
-    data_source = 'fineweb'
+    B = train_config['B']  # micro batch size
+    T = train_config['T']
+
+    max_lr = train_config['max_lr']
+    min_lr = train_config['max_lr'] * 0.1
+    warmup_steps = train_config['warmup_steps']
+    max_steps = train_config['max_steps']
+    weight_decay = train_config['weight_decay']
+    betas = train_config['betas']
+    eps = train_config['eps']
+    min_lr_frac = train_config.get('min_lr_frac', 0.1)
+    lr_schedule = train_config['lr_schedule']
+    warmdown_ratio = train_config.get('warmdown_ratio', 0.0)
+    use_compile = False
 
     # gradient accumulation
     assert total_batch_size % (B * T * ddp_world_size) == 0
@@ -263,7 +331,7 @@ if __name__ == '__main__':
         print(
             f"total desired batch size: {total_batch_size}, calculated gradient accumulation steps: {grad_accum_steps}")
 
-    model = GPT(GPTConfig(vocab_size=50304))
+    model = GPT(GPTConfig(**model_config))
     model.to(device)
     if use_compile:
         model = torch.compile(model)
@@ -273,23 +341,28 @@ if __name__ == '__main__':
 
     enc = tiktoken.get_encoding("gpt2")
 
-    max_lr = 6e-4
-    min_lr = max_lr * 0.1
-    warmup_steps = 715  # gpt paper says warmup 375e6 tokens, 375e6/2**19 = 715
-    max_steps = 19073  # we want to train 10B tokens total, 10e9/2**19 = 19073
-
 
     def get_lr(it):
-        # linear warmup for warmup_iters steps
+        # linear warmup
         if it < warmup_steps:
             return max_lr * (it + 1) / warmup_steps
-        # if it > lr_decay_iters, return min learning rate
+        # past training horizon
         if it > max_steps:
+            min_lr = max_lr * min_lr_frac
             return min_lr
-        decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff starts at 1 and goes to 0
-        return min_lr + coeff * (max_lr - min_lr)
+
+        if lr_schedule == 'cosine':
+            min_lr = max_lr * 0.1
+            decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            return min_lr + coeff * (max_lr - min_lr)
+
+        elif lr_schedule == 'trapezoidal':
+            warmdown_iters = round(warmdown_ratio * max_steps)
+            if it <= max_steps - warmdown_iters:
+                return max_lr  # constant phase
+            progress = (max_steps - it) / warmdown_iters
+            return max_lr * (progress + (1 - progress) * min_lr_frac)
 
 
     if data_source == 'climbmix':
@@ -300,9 +373,10 @@ if __name__ == '__main__':
         val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split='val')
 
     # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-    optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
+    optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type,
+                                               betas=betas, eps=eps)
 
-    log_file = f"log_{data_source}.txt"
+    log_file = f"weights/log_{data_source}_{model_size}.txt"
     with open(log_file, 'w') as f:  # open for writing to clear the file
         pass
 
@@ -333,13 +407,14 @@ if __name__ == '__main__':
                     if step > 0 and (step % 5000 == 0 or last_step):
                         checkpoint = {
                             'model': raw_model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
                             'config': raw_model.config,
                             'step': step,
                             'val_loss': val_loss_accum.item()
                         }
                         # you might also want to add optimizer.state_dict() and
                         # rng seeds etc., if you wanted to more exactly resume training
-                        torch.save(checkpoint, f'model_{step:05d}_{data_source}.pt')
+                        torch.save(checkpoint, f'weights/model_{step:05d}_{data_source}_{model_size}.pt')
 
         # hellaswag val
         if (step % 250 == 0 or last_step) and (not use_compile):
@@ -420,8 +495,12 @@ if __name__ == '__main__':
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         lr = get_lr(step)
+        # https://github.com/karpathy/nanochat/blob/47e983eea7513d545fb6becc8b32756b6c43d06b/scripts/base_train.py#L385
+        wd = weight_decay * 0.5 * (1.0 + math.cos(math.pi * step / max_steps))
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+            if param_group['weight_decay'] > 0:
+                param_group['weight_decay'] = wd
         optimizer.step()
 
         if device_type == "cuda":

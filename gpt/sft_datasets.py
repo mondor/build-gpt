@@ -28,8 +28,8 @@ class SmolTalk:
 class MMLUTask:
     letters = ('A', 'B', 'C', 'D')
 
-    def __init__(self, split):
-        self.ds = load_dataset('cais/mmlu', 'all', split=split).shuffle(seed=42)
+    def __init__(self, subset, split):
+        self.ds = load_dataset('cais/mmlu', subset, split=split).shuffle(seed=42)
 
     def __len__(self):
         return len(self.ds)
@@ -47,8 +47,8 @@ class MMLUTask:
 
 
 class GSM8KTask:
-    def __init__(self, split):
-        self.ds = load_dataset('openai/gsm8k', 'main', split=split).shuffle(seed=42)
+    def __init__(self, subset, split):
+        self.ds = load_dataset('openai/gsm8k', subset, split=split).shuffle(seed=42)
 
     def __len__(self):
         return len(self.ds)
