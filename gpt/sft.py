@@ -10,7 +10,7 @@ import re
 from train_gpt import GPT, GPTConfig, TRAIN_CONFIG, MODEL_CONFIG
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
 
-# torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
+# torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_760M.pt
 ddp = int(os.environ.get('RANK', -1)) != -1
 if ddp:
     assert torch.cuda.is_available()
@@ -264,6 +264,9 @@ if __name__ == '__main__':
     step = 0
     x, y, progress = next(train_loader)
     while True:
+        if progress > 1:
+            break
+
         t0 = time.time()
 
         if step % 250 == 0:
@@ -307,9 +310,6 @@ if __name__ == '__main__':
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
 
         step += 1
-
-        if progress > 1:
-            break
 
     val_loss_accum = eval_model()
     if ddp_rank == 0:

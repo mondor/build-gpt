@@ -18,7 +18,7 @@ import tiktoken
 from hellaswag import render_example, iterate_examples, get_most_likely_row
 
 # torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 124M --data-source fineweb
-# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 700M --data-source climbmix
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 760M --data-source climbmix
 MODEL_CONFIG = {
     '124M': dict(
         block_size=1024,
@@ -27,7 +27,7 @@ MODEL_CONFIG = {
         n_head=12,
         n_embed=768,
     ),
-    '700M': dict(
+    '760M': dict(
         block_size=2048,
         vocab_size=50304,
         n_layer=24,
@@ -48,7 +48,7 @@ TRAIN_CONFIG = {
         max_steps=19073,  # in the gpt paper, the model was trained on 10B tokens, 10e9/2**19 = 19073
         lr_schedule='cosine'
     ),
-    '700M': dict(
+    '760M': dict(
         B=16,
         T=2048,
         max_lr=3e-4,
@@ -56,7 +56,7 @@ TRAIN_CONFIG = {
         betas=(0.9, 0.95),
         eps=1e-8,
         warmup_steps=40,
-        max_steps=10700,  # in nanochat repo, data:param ratio was 8:1
+        max_steps=23204,  # in nanochat repo, tokens:params ratio was 8:1, but I will train it 16:1
         lr_schedule='trapezoidal',
         warmdown_ratio=0.65,
         min_lr_frac=0.05,
@@ -272,9 +272,13 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-size', type=str, default='124M', choices=['124M', '700M'])
+    parser.add_argument('--model-size', type=str, default='124M', choices=['124M', '760M'])
     parser.add_argument('--data-source', type=str, default='fineweb', choices=['fineweb', 'climbmix'])
+    parser.add_argument('--from-step', type=int, default=0)
     args = parser.parse_args()
+    from_step = args.from_step
+    data_source = args.data_source
+    model_size = args.model_size
 
     # set up distributed data parallel
     # torchrun command sets the env variables
@@ -303,11 +307,9 @@ if __name__ == '__main__':
 
     torch.set_float32_matmul_precision('high')  # use tf32
 
-    model_config = MODEL_CONFIG[args.model]
-    train_config = TRAIN_CONFIG[args.model]
+    model_config = MODEL_CONFIG[model_size]
+    train_config = TRAIN_CONFIG[model_size]
 
-    data_source = args.data_source
-    model_size = args.model_size
     total_batch_size = 524288  # 2**19, ~0.5M tokens in the original gpt2 paper
     B = train_config['B']  # micro batch size
     T = train_config['T']
@@ -331,7 +333,13 @@ if __name__ == '__main__':
         print(
             f"total desired batch size: {total_batch_size}, calculated gradient accumulation steps: {grad_accum_steps}")
 
+    # load or create the model
     model = GPT(GPTConfig(**model_config))
+    if from_step > 0:
+        checkpoint = torch.load(f'weights/model_{from_step}_{data_source}_{model_size}.pt', weights_only=False,
+                                map_location=device)
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in checkpoint['model'].items()}
+        model.load_state_dict(state_dict)
     model.to(device)
     if use_compile:
         model = torch.compile(model)
@@ -381,7 +389,7 @@ if __name__ == '__main__':
         with open(log_file, 'w') as f:  # open for writing to clear the file
             pass
 
-    for step in range(max_steps):
+    for step in range(from_step, max_steps):
         t0 = time.time()
         last_step = (step == max_steps - 1)
 
