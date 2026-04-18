@@ -11,7 +11,7 @@ from train_gpt import GPT, GPTConfig, TRAIN_CONFIG, MODEL_CONFIG
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
 
 # torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
-ddp = int(os.environ.get('RANK', -1) != -1)
+ddp = int(os.environ.get('RANK', -1)) != -1
 if ddp:
     assert torch.cuda.is_available()
     init_process_group(backend='nccl')
@@ -152,7 +152,7 @@ def sft_data_generator(dataset, buffer_size=100):
         mask_targets = mask_tensor[:, 1:].to(device)
         targets[mask_targets == 0] = -100  # cross_entropy ignores index -100
 
-        yield inputs.to(device), targets.to(device), consumed / dataset_len
+        yield inputs, targets, consumed / dataset_len
 
 
 # ----- Load pretrained checkpoint -----
@@ -184,10 +184,10 @@ if __name__ == '__main__':
 
     # --- Hyperparameters ---
     B = 16
-    T = config['block_size']
+    T = config.block_size
     total_batch_size = 524288
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-    learning_rate = 6e-5  # 10x lower than pretraining max_lr
+    learning_rate = 3e-5  # 10x lower than pretraining max_lr
     weight_decay = 0.0
 
     train_dataset = TaskMixture([
@@ -241,16 +241,14 @@ if __name__ == '__main__':
 
             if ddp_rank == 0:
                 print(f'sft val loss: {val_loss_accum.item():.4f}')
-
-                checkpoint = {
+                # you might also want to add optimizer.state_dict() and
+                # rng seeds etc., if you wanted to more exactly resume training
+                torch.save({
                     'model': raw_model.state_dict(),
                     'config': raw_model.config,
                     'step': step,
                     'val_loss': val_loss_accum.item()
-                }
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(checkpoint, f'weights/sft_{checkpoint_filename}')
+                }, f'weights/sft_{checkpoint_filename}')
 
 
     step = 0
@@ -293,7 +291,7 @@ if __name__ == '__main__':
 
         if ddp_rank == 0:
             print(
-                f'sft step {step}, loss: {loss_accum:.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
+                f'sft step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
 
         if step % 5000 == 0:
             eval_and_save(step)

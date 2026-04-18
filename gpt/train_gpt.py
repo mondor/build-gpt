@@ -278,7 +278,7 @@ if __name__ == '__main__':
 
     # set up distributed data parallel
     # torchrun command sets the env variables
-    ddp = int(os.environ.get('RANK', -1) != -1)
+    ddp = int(os.environ.get('RANK', -1)) != -1
     if ddp:
         assert torch.cuda.is_available()
         init_process_group(backend='nccl')
