@@ -384,6 +384,9 @@ if __name__ == '__main__':
     optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type,
                                                betas=betas, eps=eps)
 
+    if from_step > 0:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
     log_file = f"weights/log_{data_source}_{model_size}.txt"
     if ddp_rank == 0:
         with open(log_file, 'w') as f:  # open for writing to clear the file
