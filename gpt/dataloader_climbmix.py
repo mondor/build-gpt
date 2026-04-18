@@ -5,10 +5,13 @@ import pyarrow.parquet as pq
 
 DATA_DIR = '../../climbmix'
 
+# todo remove this hack
+FROM_SHARD = 130
+
 
 def list_parquet_files():
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith('.parquet'))
-    return [os.path.join(DATA_DIR, f) for f in files]
+    return [os.path.join(DATA_DIR, f) for f in files][FROM_SHARD:]
 
 
 def _document_batches(split, process_rank, num_processes, batch_size=128):
