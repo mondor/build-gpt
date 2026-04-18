@@ -5,7 +5,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import tiktoken
-import glob, re
+import re
 
 from train_gpt import GPT, GPTConfig, TRAIN_CONFIG, MODEL_CONFIG
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
@@ -155,6 +155,14 @@ def sft_data_generator(dataset, buffer_size=100):
         yield inputs, targets, consumed / dataset_len
 
 
+def parse_checkpoint_filename(filename):
+    m = re.match(r'model_(\d+)_([^_]+)_([^_]+)\.pt$', filename)
+    if not m:
+        raise ValueError(f'unexpected checkpoint filename: {filename}')
+    step, data_source, model_size = m.group(1), m.group(2), m.group(3)
+    return int(step), data_source, model_size
+
+
 # ----- Load pretrained checkpoint -----
 if __name__ == '__main__':
     import argparse
@@ -163,6 +171,7 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint-filename', type=str)
     args = parser.parse_args()
     checkpoint_filename = args.checkpoint_filename
+    _, data_source, model_size = parse_checkpoint_filename(checkpoint_filename)
 
     torch.set_float32_matmul_precision('high')  # use tf32
 
@@ -183,7 +192,7 @@ if __name__ == '__main__':
     enc = tiktoken.get_encoding('gpt2')
 
     # --- Hyperparameters ---
-    B = 16
+    B = 8
     T = config.block_size
     total_batch_size = 524288
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -209,6 +218,11 @@ if __name__ == '__main__':
     optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=learning_rate,
                                                device_type=device_type, betas=(0.9, 0.95), eps=1e-8)
 
+    log_file = f"weights/sft_log_{data_source}_{model_size}.txt"
+    if ddp_rank == 0:
+        with open(log_file, 'w') as f:  # open for writing to clear the file
+            pass
+
 
     # Learning rate schedule (linear warmup, constant, linear warmdown)
     # Same shape as base_train but uses progress (0→1) instead of absolute step counts,
@@ -223,7 +237,7 @@ if __name__ == '__main__':
             return (1 - decay) * 1.0 + decay * final_lr_frac
 
 
-    def eval_and_save(step):
+    def eval_model():
         model.eval()
         with torch.no_grad():
             val_loss_accum = 0.0
@@ -240,21 +254,20 @@ if __name__ == '__main__':
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
 
             if ddp_rank == 0:
-                print(f'sft val loss: {val_loss_accum.item():.4f}')
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
-                torch.save({
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'step': step,
-                    'val_loss': val_loss_accum.item()
-                }, f'weights/sft_{checkpoint_filename}')
+                print(f'val loss: {val_loss_accum.item():.4f}')
+                with open(log_file, 'a') as f:
+                    f.write(f'{step} val {val_loss_accum.item():.4f}\n')
+
+        return val_loss_accum
 
 
     step = 0
     x, y, progress = next(train_loader)
     while True:
         t0 = time.time()
+
+        if step % 250 == 0:
+            eval_model()
 
         model.train()
         optimizer.zero_grad()
@@ -292,14 +305,20 @@ if __name__ == '__main__':
         if ddp_rank == 0:
             print(
                 f'sft step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
-
-        if step % 5000 == 0:
-            eval_and_save(step)
+            with open(log_file, "a") as f:
+                f.write(f"{step} train {loss_accum.item():.6f}\n")
 
         if progress > 1:
             break
 
-    eval_and_save(step)
+    if ddp_rank == 0:
+        val_loss_accum = eval_model()
+        torch.save({
+            'model': raw_model.state_dict(),
+            'config': raw_model.config,
+            'step': step,
+            'val_loss': val_loss_accum.item()
+        }, f'weights/sft_{checkpoint_filename}')
 
     if ddp:
         destroy_process_group()

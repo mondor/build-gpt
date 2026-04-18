@@ -377,8 +377,9 @@ if __name__ == '__main__':
                                                betas=betas, eps=eps)
 
     log_file = f"weights/log_{data_source}_{model_size}.txt"
-    with open(log_file, 'w') as f:  # open for writing to clear the file
-        pass
+    if ddp_rank == 0:
+        with open(log_file, 'w') as f:  # open for writing to clear the file
+            pass
 
     for step in range(max_steps):
         t0 = time.time()
