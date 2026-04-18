@@ -18,7 +18,7 @@ import tiktoken
 from hellaswag import render_example, iterate_examples, get_most_likely_row
 
 # torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 124M --data-source fineweb
-# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 760M --data-source climbmix
+# torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 760M --data-source climbmix --from-step 10699
 MODEL_CONFIG = {
     '124M': dict(
         block_size=1024,
@@ -49,7 +49,7 @@ TRAIN_CONFIG = {
         lr_schedule='cosine'
     ),
     '760M': dict(
-        B=16,
+        B=8,
         T=2048,
         max_lr=3e-4,
         weight_decay=0.035,
