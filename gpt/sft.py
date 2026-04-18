@@ -149,7 +149,7 @@ def sft_data_generator(dataset, buffer_size=100):
         # Apply loss mask: set targets to -1 where mask=0
         mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
         mask_targets = mask_tensor[:, 1:].to(device)
-        targets[mask_targets == 0] = -1  # cross_entropy ignores index -1
+        targets[mask_targets == 0] = -100  # cross_entropy ignores index -100
 
         yield inputs.to(device), targets.to(device), consumed / dataset_len
 
