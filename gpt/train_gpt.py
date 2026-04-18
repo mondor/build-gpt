@@ -19,31 +19,6 @@ from hellaswag import render_example, iterate_examples, get_most_likely_row
 
 # torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 124M --data-source fineweb
 # torchrun --standalone --nproc_per_node=8 train_gpt.py --model-size 700M --data-source climbmix
-# set up distributed data parallel
-# torchrun command sets the env variables
-ddp = int(os.environ.get('RANK', -1) != -1)
-if ddp:
-    assert torch.cuda.is_available()
-    init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)
-else:
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    device = 'cuda' if torch.cuda.is_available() else (
-        'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
-
-device_type = "cuda" if device.startswith("cuda") else "cpu"
-print(f'using device_type: {device_type}')
-
-torch.manual_seed(1337)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
-
 MODEL_CONFIG = {
     '124M': dict(
         block_size=1024,
@@ -300,6 +275,31 @@ if __name__ == '__main__':
     parser.add_argument('--model-size', type=str, default='124M', choices=['124M', '700M'])
     parser.add_argument('--data-source', type=str, default='fineweb', choices=['fineweb', 'climbmix'])
     args = parser.parse_args()
+
+    # set up distributed data parallel
+    # torchrun command sets the env variables
+    ddp = int(os.environ.get('RANK', -1) != -1)
+    if ddp:
+        assert torch.cuda.is_available()
+        init_process_group(backend='nccl')
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        device = 'cuda' if torch.cuda.is_available() else (
+            'mps' if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else 'cpu')
+
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    print(f'using device_type: {device_type}')
+
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
 
     torch.set_float32_matmul_precision('high')  # use tf32
 

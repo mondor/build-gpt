@@ -10,7 +10,6 @@ from train_gpt import GPT
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
 
 # torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
-
 ddp = int(os.environ.get('RANK', -1) != -1)
 if ddp:
     assert torch.cuda.is_available()
@@ -176,7 +175,7 @@ if __name__ == '__main__':
     raw_model = model.module if ddp else model
     if ddp_rank == 0:
         print(
-            f'Loaded pretrained model {checkpoint_filename} (step: {checkpoint['step']}, val_loss:{checkpoint['val_loss']:.4f})')
+            f"Loaded pretrained model {checkpoint_filename} (step: {checkpoint['step']}, val_loss:{checkpoint['val_loss']:.4f})")
 
     enc = tiktoken.get_encoding('gpt2')
 
