@@ -182,7 +182,7 @@ if __name__ == '__main__':
     enc = tiktoken.get_encoding('gpt2')
 
     # --- Hyperparameters ---
-    B = 32
+    B = 16
     T = 1024
     total_batch_size = 524288
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
