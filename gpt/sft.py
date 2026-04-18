@@ -294,8 +294,6 @@ if __name__ == '__main__':
             param_group['lr'] = lr
         optimizer.step()
 
-        step += 1
-
         if device_type == "cuda":
             torch.cuda.synchronize()
 
@@ -304,21 +302,27 @@ if __name__ == '__main__':
 
         if ddp_rank == 0:
             print(
-                f'sft step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
+                f'step {step}, loss: {loss_accum.item():.6f}, lr: {lr:.4e}, progress: {progress * 100:.1f}%, time: {dt * 1000:.2f}ms')
             with open(log_file, "a") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
+
+        step += 1
 
         if progress > 1:
             break
 
     val_loss_accum = eval_model()
     if ddp_rank == 0:
-        torch.save({
+        checkpoint = {
             'model': raw_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
             'config': raw_model.config,
             'step': step,
             'val_loss': val_loss_accum.item()
-        }, f'weights/sft_{checkpoint_filename}')
+        }
+        # you might also want to add optimizer.state_dict() and
+        # rng seeds etc., if you wanted to more exactly resume training
+        torch.save(checkpoint, f'weights/sft_model_{step:05d}_{data_source}_{model_size}.pt')
 
     if ddp:
         destroy_process_group()
