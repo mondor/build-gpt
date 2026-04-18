@@ -263,9 +263,9 @@ while True:
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
     # Step the optimizer
-    lrm = get_lr_multiplier(progress)
+    lr = learning_rate * get_lr_multiplier(progress)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = learning_rate * lrm
+        param_group['lr'] = lr
     optimizer.step()
 
     step += 1
