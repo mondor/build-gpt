@@ -167,8 +167,10 @@ if __name__ == '__main__':
 
     checkpoint = torch.load(f'weights/{checkpoint_filename}', weights_only=False, map_location=device)
     config = checkpoint['config']
+    # todo we saved the compiled model previously, we no longer do that
+    state_dict = {k.replace('_orig_mod.', ''): v for k, v in checkpoint['model'].items()}
     model = GPT(config)
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(state_dict)
     model = model.to(device)
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
