@@ -49,7 +49,7 @@ TRAIN_CONFIG = {
         lr_schedule='cosine'
     ),
     '760M': dict(
-        B=8,
+        B=16,
         T=2048,
         max_lr=3e-4,
         weight_decay=0.035,
