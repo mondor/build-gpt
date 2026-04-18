@@ -6,7 +6,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import tiktoken
 
-from train_gpt import GPT
+from train_gpt import GPT, GPTConfig
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
 
 # torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
