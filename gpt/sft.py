@@ -311,8 +311,8 @@ if __name__ == '__main__':
         if progress > 1:
             break
 
+    val_loss_accum = eval_model()
     if ddp_rank == 0:
-        val_loss_accum = eval_model()
         torch.save({
             'model': raw_model.state_dict(),
             'config': raw_model.config,
