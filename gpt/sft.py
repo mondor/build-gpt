@@ -5,8 +5,9 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import tiktoken
+import glob, re
 
-from train_gpt import GPT, GPTConfig
+from train_gpt import GPT, GPTConfig, TRAIN_CONFIG, MODEL_CONFIG
 from sft_datasets import SmolTalk, MMLUTask, GSM8KTask, TaskMixture
 
 # torchrun --standalone --nproc_per_node=2 sft.py --checkpoint-filename=model_10699_climbmix_700M.pt
@@ -183,7 +184,7 @@ if __name__ == '__main__':
 
     # --- Hyperparameters ---
     B = 16
-    T = 1024
+    T = config['block_size']
     total_batch_size = 524288
     grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
     learning_rate = 6e-5  # 10x lower than pretraining max_lr
